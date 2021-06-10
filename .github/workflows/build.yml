@@ -1,0 +1,81 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      remote_ref:
+        description: 'Remote reference'
+        required: true
+        default: 'master'
+      local_ref:
+        description: 'Local reference'
+        required: true
+        default: 'master'
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-20.04
+    steps:
+
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v1
+      with:
+        fetch-depth: 0
+
+    - name: Install
+      run: |
+        sudo apt-get update
+        sudo apt-get install wget tar cmake ninja-build clang python3 build-essential libpthread-stubs0-dev clang-11 gcc-multilib lld
+
+    - name: Git
+      run: |
+        git clone https://github.com/ClickHouse/ClickHouse.git
+        cd ClickHouse
+        git checkout ${{ github.event.inputs.remote_ref }}
+        git submodule init
+        git submodule update
+
+    - name: ARM toolchain
+      run: |
+        cd ClickHouse
+        mkdir -p build-aarch64/cmake/toolchain/linux-aarch64
+        wget 'https://developer.arm.com/-/media/Files/downloads/gnu-a/8.3-2019.03/binrel/gcc-arm-8.3-2019.03-x86_64-aarch64-linux-gnu.tar.xz?revision=2e88a73f-d233-4f96-b1f4-d8b36e9bb0b9&la=en' -O gcc-arm-8.3-2019.03-x86_64-aarch64-linux-gnu.tar.xz
+        tar xJf gcc-arm-8.3-2019.03-x86_64-aarch64-linux-gnu.tar.xz -C cmake/toolchain/linux-aarch64 --strip-components=1
+      
+    - name: Build
+      run: |
+        cd ClickHouse
+        mkdir build-arm64
+        CC=clang-11 CXX=clang++-11 cmake . -Bbuild-arm64 -DCMAKE_TOOLCHAIN_FILE=cmake/linux/toolchain-aarch64.cmake -DCMAKE_BUILD_TYPE=RELEASE
+        ninja -C build-arm64
+
+    - name: Create Release
+      id: create_release
+      uses: zendesk/action-create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.event.inputs.local_ref }}
+        release_name: Release ${{ github.event.inputs.local_ref }}
+        draft: false
+        prerelease: false
+
+    - name: Upload Release Asset
+      uses: actions/github-script@v2
+      with:
+        github-token: ${{secrets.GITHUB_TOKEN}}
+        script: |
+          const fs = require('fs').promises;
+          const upload_url = '${{ steps.create_release.outputs.upload_url }}';
+          for (let file of await fs.readdir('./ClickHouse/build-arm64/programs')) {
+            console.log('uploading', file);
+            if (!file.includes('clickhouse')) {
+              continue;
+            }
+            await github.repos.uploadReleaseAsset({
+              url: upload_url,
+              name: file,
+              data: await fs.readFile(`./ClickHouse/build-arm64/programs/${file}`)
+            });
+          }
